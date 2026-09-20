@@ -81,7 +81,17 @@ async function handleRequest(request, response, env, mediaRegistry) {
       return response.end(content);
     }
     if (request.method === "GET" && url.pathname === "/api/status") {
-      const config = await readConfig(env);
+      let config;
+      try {
+        config = await readConfig(env);
+      } catch {
+        return sendJson(response, 200, {
+          jevConfigured: false,
+          jevModel: env.OPENROUTER_JEV_MODEL || "~typesafe/jev-latest",
+          socai: { installed: false, version: null, capabilities: { instagram: false, tiktok: false, linkedin: false } },
+          configError: "Configuration could not be read.",
+        });
+      }
       const socai = await probeSocai(config, env);
       return sendJson(response, 200, {
         jevConfigured: Boolean(resolveApiKey(config, env)),

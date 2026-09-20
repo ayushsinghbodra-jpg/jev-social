@@ -216,9 +216,8 @@ if (args[0] === "--version") {
       tiktok: true,
       linkedin: false,
     });
-    assert.equal(status.bin, undefined);
+    assert.equal(status.bin, mock, "probeSocai must retain bin internally for CLI callers");
     assert.equal(status.configPath, undefined);
-    assert.ok(!JSON.stringify(status).includes(directory));
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -236,6 +235,26 @@ test("sanitizeCliErrorText redacts all types of system paths including /opt, /us
     "spawn [path] ENOENT",
   );
   assert.equal(
+    sanitizeCliErrorText("spawn /Volumes/My Disk/socai ENOENT"),
+    "spawn [path] ENOENT",
+  );
+  assert.equal(
+    sanitizeCliErrorText("spawn '/Volumes/My Disk/socai' ENOENT"),
+    "spawn [path] ENOENT",
+  );
+  assert.equal(
+    sanitizeCliErrorText("Error: C:\\Program Files\\socai\\socai.exe not found"),
+    "Error: [path] not found",
+  );
+  assert.equal(
+    sanitizeCliErrorText('"C:\\Program Files\\socai\\socai.exe" is not recognized'),
+    "[path] is not recognized",
+  );
+  assert.equal(
+    sanitizeCliErrorText("/usr/local/bin/socai exited with code 1"),
+    "[path] exited with code 1",
+  );
+  assert.equal(
     sanitizeCliErrorText("socai: /var/log/socai.err: Permission denied"),
     "socai: [path]: Permission denied",
   );
@@ -248,9 +267,66 @@ test("sanitizeCliErrorText redacts all types of system paths including /opt, /us
     "error in [path] script",
   );
   assert.equal(
-    sanitizeCliErrorText("C:\\Program Files\\socai\\socai.exe failed with code 1"),
-    "[path] failed with code 1",
+    sanitizeCliErrorText("socai v0.5.6 (3/3 ready)"),
+    "socai v0.5.6 (3/3 ready)",
+    "Non-path phrases like (3/3 ready) must not be corrupted",
   );
 });
+
+test("platformSupported returns false when help text mentions 'search' but the subcommand is absent", async () => {
+  const { platformSupported } = await import("../src/socai.js");
+  const directory = await mkdtemp(path.join(os.tmpdir(), "jev-social-neg-help-"));
+  const mock = path.join(directory, "socai-mock.mjs");
+  await writeFile(
+    mock,
+    `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "linkedin" && args[1] === "--help") {
+  console.log("linkedin search is unavailable in this build\\nCommands: profile company");
+} else if (args[0] === "linkedin" && args[1] === "search" && args[2] === "--help") {
+  console.error("unknown command: search");
+  process.exitCode = 1;
+} else {
+  process.exitCode = 2;
+}
+`,
+    { mode: 0o755 },
+  );
+  await chmod(mock, 0o755);
+
+  try {
+    const isSupported = await platformSupported(mock, "linkedin");
+    assert.equal(isSupported, false, "Disclaimers mentioning search must not trigger false positive");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("platformSupported returns true only when the subcommand help genuinely succeeds", async () => {
+  const { platformSupported } = await import("../src/socai.js");
+  const directory = await mkdtemp(path.join(os.tmpdir(), "jev-social-pos-help-"));
+  const mock = path.join(directory, "socai-mock.mjs");
+  await writeFile(
+    mock,
+    `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "instagram" && args[1] === "search" && args[2] === "--help") {
+  console.log("Usage: socai instagram search <query>");
+} else {
+  process.exitCode = 2;
+}
+`,
+    { mode: 0o755 },
+  );
+  await chmod(mock, 0o755);
+
+  try {
+    const isSupported = await platformSupported(mock, "instagram");
+    assert.equal(isSupported, true, "Subcommand search --help exit 0 must report platform supported");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 
 

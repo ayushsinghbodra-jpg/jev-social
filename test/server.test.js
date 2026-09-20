@@ -122,9 +122,34 @@ else process.exitCode = 2;
     assert.ok(!text.includes(directory), "Filesystem path must not leak");
     assert.ok(!text.includes("socai-mock.mjs"), "Binary filename must not leak");
     assert.equal(body.configPath, undefined);
+    assert.equal(body.socai.bin, undefined, "/api/status must omit bin property");
   } finally {
     await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("/api/status never leaks config path when readConfig fails", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "jev-social-err-status-"));
+  // Use a non-existent or invalid directory path as home to trigger config read failure
+  const badEnv = {
+    ...process.env,
+    JEV_SOCIAL_HOME: path.join(directory, "nonexistent-dir", "sub"),
+    HOME: path.join(directory, "nonexistent-dir", "sub"),
+    SOCAI_HOME: path.join(directory, "nonexistent-dir", "sub"),
+  };
+  const { server, url } = await startServer({ port: 0, open: false, env: badEnv });
+  try {
+    const response = await fetch(`${url}/api/status`);
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.jevConfigured, false);
+    const text = JSON.stringify(body);
+    assert.ok(!text.includes(directory), "Filesystem path must not leak when readConfig fails");
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 

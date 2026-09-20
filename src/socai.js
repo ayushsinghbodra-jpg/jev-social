@@ -32,6 +32,7 @@ export async function probeSocai(config = {}, env = process.env) {
     if (root.code !== 0) {
       return {
         installed: false,
+        bin,
         version: null,
         capabilities: { instagram: false, tiktok: false, linkedin: false },
         error: concise(root.stderr || root.stdout),
@@ -44,10 +45,11 @@ export async function probeSocai(config = {}, env = process.env) {
         capabilities[platform] = await platformSupported(bin, platform, env);
       }),
     );
-    return { installed: true, version, capabilities };
+    return { installed: true, bin, version, capabilities };
   } catch (error) {
     return {
       installed: false,
+      bin,
       version: null,
       capabilities: { instagram: false, tiktok: false, linkedin: false },
       error: error.code === "ENOENT" ? "socai executable not found" : concise(error.message),
@@ -73,9 +75,25 @@ export async function getSocaiVersion(bin, env = process.env) {
 
 export async function platformSupported(bin, platform, env = process.env, signal) {
   try {
-    const result = await runProcess(bin, [platform, "--help"], { timeoutMs: 15_000, env, signal });
-    if (result.aborted) throw abortedError();
-    return result.code === 0 && /\bsearch\b/i.test(`${result.stdout}\n${result.stderr}`);
+    // Probe the concrete subcommand's help rather than pattern-matching the
+    // parent command's prose — a platform may mention "search" in an error
+    // or disclaimer string without the subcommand actually existing.
+    const subcommand = await runProcess(bin, [platform, "search", "--help"], {
+      timeoutMs: 15_000,
+      env,
+      signal,
+    }).catch(() => null);
+    if (subcommand?.aborted) throw abortedError();
+    if (subcommand && subcommand.code === 0) return true;
+
+    const parent = await runProcess(bin, [platform, "--help"], { timeoutMs: 15_000, env, signal });
+    if (parent.aborted) throw abortedError();
+    if (parent.code !== 0) return false;
+    const output = `${parent.stdout}\n${parent.stderr}`;
+    return (
+      /(?:commands|subcommands|available commands|actions):\s*[^\n]*\bsearch\b/i.test(output) ||
+      /(?:^|\n)\s*search(?:\s{2,}[^\n]*|\s*\[[^\n]*|\s*$)/m.test(output)
+    );
   } catch (error) {
     if (error?.code === "SOCAI_ABORTED" || error?.name === "AbortError") throw abortedError();
     return false;
@@ -303,11 +321,24 @@ export function parseJsonOutput(output) {
 export function sanitizeCliErrorText(text) {
   if (typeof text !== "string") return "";
   return text
-    .replace(/(?:^|[\s"'`([<{=:])(?:[A-Za-z]:[\\/]|~[\\/]|(?:\.{1,2}[\\/]+)|\/(?:[a-zA-Z0-9._~-]+[\\/]))[^\s"'`<>:=]+/g, (match) => {
+    // 1. Quoted paths
+    .replace(/(["'`])(?:\/|~\/|[A-Za-z]:[/\\]|\\\\|\.{1,2}[/\\])[^"'`]*\1/g, "[path]")
+    // 2. Unquoted paths with spaces (e.g. /Volumes/My Disk/socai or C:\Program Files\socai\socai.exe)
+    .replace(
+      /(?:^|[\s"'`([<{=:])(?:\/|~\/|[A-Za-z]:[/\\]|\\\\|\.{1,2}[/\\])(?:[^\s:]|(?<! )\s(?! ))*?(?=\s+(?:ENOENT|EACCES|EPERM|EEXIST|not found|no such file|is not recognized|exited with|failed with|script)\b|(?::|[,;!?])(?:\s|$|\b)|\s{2}|$)/gi,
+      (match) => {
+        const leadingChar = match.match(/^[\s"'`([<{=:]/)?.[0] || "";
+        return `${leadingChar}[path]`;
+      },
+    )
+    // 3. General paths (single token or standard paths)
+    .replace(/(?:^|[\s"'`([<{=:])(?:[A-Za-z]:[/\\]|~[/\\]|(?:\.{1,2}[/\\]+)|\/(?:[a-zA-Z0-9._~-]+[/\\]))[^\s"'`<>:=]+/g, (match) => {
       const leadingChar = match.match(/^[\s"'`([<{=:]/)?.[0] || "";
       return `${leadingChar}[path]`;
     })
-    .replace(/\b(?:[a-zA-Z0-9_.-]+[\\/]){2,}[a-zA-Z0-9_.-]+/g, "[path]")
+    // 4. Relative multi-segment paths like foo/bar/baz
+    .replace(/\b(?:[a-zA-Z0-9_.-]+[/\\]){2,}[a-zA-Z0-9_.-]+/g, "[path]")
+    // 5. Deduplicate and trim
     .replace(/(?:\[path\](?:\s+\[path\])*)/g, "[path]")
     .replace(/\s+/g, " ")
     .trim();
