@@ -5,7 +5,7 @@ import { buildActionArgs } from "./actions.js";
 
 const PLATFORMS = ["instagram", "tiktok", "linkedin"];
 
-export async function actionCapabilities({ config = {}, env = process.env, platform, signal }) {
+export async function actionCapabilities({ config = {}, env = process.env, platform, signal, capabilities }) {
   if (!PLATFORMS.includes(platform)) throw new AppError("Unsupported platform.", { code: "INVALID_PLATFORM" });
   const bin = await resolveSocaiBin(config, env);
   const result = await runProcess(bin, [platform, "--help"], { env, signal, timeoutMs: 15_000 });
@@ -13,7 +13,19 @@ export async function actionCapabilities({ config = {}, env = process.env, platf
   if (result.code !== 0 || result.timedOut) throw new AppError(`Could not read socai ${platform} commands.`, { code: "SOCAI_CAPABILITY_MISSING" });
   const help = `${result.stdout}\n${result.stderr}`;
   const names = ["search", "get-posts", "get-videos", "profile", "author", "company", "history", "page_state"];
-  return names.filter((name) => new RegExp(`(?:^|\\s)${name}(?=\\s|$)`, "m").test(help));
+
+  const isSearchSupported = capabilities && typeof capabilities[platform] === "boolean"
+    ? capabilities[platform]
+    : await platformSupported(bin, platform, env, signal);
+
+  const discovered = names.filter((name) => new RegExp(`(?:^|\\s)${name}(?=\\s|$)`, "m").test(help));
+  if (!isSearchSupported) {
+    return discovered.filter((name) => name !== "search");
+  }
+  if (!discovered.includes("search")) {
+    discovered.unshift("search");
+  }
+  return discovered;
 }
 
 export async function runSocaiAction({ action, config = {}, env = process.env, signal, onProgress }) {
@@ -25,10 +37,11 @@ export async function resolveSocaiBin(config = {}, env = process.env) {
   return configuredSocaiBin(config, env) || (await defaultInstalledSocaiBin());
 }
 
-export async function probeSocai(config = {}, env = process.env) {
+export async function probeSocai(config = {}, env = process.env, signal) {
   const bin = await resolveSocaiBin(config, env);
   try {
-    const root = await runProcess(bin, ["--help"], { timeoutMs: 15_000, env });
+    const root = await runProcess(bin, ["--help"], { timeoutMs: 15_000, env, signal });
+    if (root.aborted) throw abortedError();
     if (root.code !== 0) {
       return {
         installed: false,
@@ -38,15 +51,18 @@ export async function probeSocai(config = {}, env = process.env) {
         error: concise(root.stderr || root.stdout),
       };
     }
-    const version = await getSocaiVersion(bin, env);
+    const version = await getSocaiVersion(bin, env, signal);
     const capabilities = { instagram: false, tiktok: false, linkedin: false };
     await Promise.all(
       PLATFORMS.map(async (platform) => {
-        capabilities[platform] = await platformSupported(bin, platform, env);
+        capabilities[platform] = await platformSupported(bin, platform, env, signal);
       }),
     );
     return { installed: true, bin, version, capabilities };
   } catch (error) {
+    if (error?.code === "SOCAI_ABORTED" || error?.name === "AbortError" || signal?.aborted) {
+      throw abortedError();
+    }
     return {
       installed: false,
       bin,
@@ -62,13 +78,17 @@ export async function probeSocai(config = {}, env = process.env) {
  * Assumes the CLI output includes the primary semver token (e.g. `socai 0.5.6` or `0.5.6-beta.1`).
  * If verbose builds output multiple version numbers, the primary/first semver token is selected.
  */
-export async function getSocaiVersion(bin, env = process.env) {
+export async function getSocaiVersion(bin, env = process.env, signal) {
   try {
-    const result = await runProcess(bin, ["--version"], { timeoutMs: 15_000, env });
+    const result = await runProcess(bin, ["--version"], { timeoutMs: 15_000, env, signal });
+    if (result.aborted) throw abortedError();
     const output = `${result.stdout}\n${result.stderr}`.trim();
     const match = output.match(/\b\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?\b/);
     return match ? match[0] : null;
-  } catch {
+  } catch (error) {
+    if (error?.code === "SOCAI_ABORTED" || error?.name === "AbortError" || signal?.aborted) {
+      throw abortedError();
+    }
     return null;
   }
 }
@@ -82,7 +102,10 @@ export async function platformSupported(bin, platform, env = process.env, signal
       timeoutMs: 15_000,
       env,
       signal,
-    }).catch(() => null);
+    }).catch((error) => {
+      if (error?.name === "AbortError") throw abortedError();
+      return null;
+    });
     if (subcommand?.aborted) throw abortedError();
     if (subcommand && subcommand.code === 0) return true;
 
@@ -320,21 +343,37 @@ export function parseJsonOutput(output) {
 
 export function sanitizeCliErrorText(text) {
   if (typeof text !== "string") return "";
-  return text
+
+  // 1. Preserve HTTP/HTTPS URLs by replacing with temporary placeholders
+  const urls = [];
+  const withUrlsPreserved = text.replace(/https?:\/\/[^\s"'`<>]+/gi, (url) => {
+    const match = url.match(/^(.*?)([.,;:!?)]*)$/);
+    const cleanUrl = match ? match[1] : url;
+    const trailing = match ? match[2] : "";
+    urls.push(cleanUrl);
+    return `__URL_PLACEHOLDER_${urls.length - 1}__${trailing}`;
+  });
+
+  // 2. Perform path redactions
+  const redacted = withUrlsPreserved
     // 1. Quoted paths
     .replace(/(["'`])(?:\/|~\/|[A-Za-z]:[/\\]|\\\\|\.{1,2}[/\\])[^"'`]*\1/g, "[path]")
     // 2. Unquoted paths with spaces (e.g. /Volumes/My Disk/socai or C:\Program Files\socai\socai.exe)
     .replace(
-      /(?:^|[\s"'`([<{=:])(?:\/|~\/|[A-Za-z]:[/\\]|\\\\|\.{1,2}[/\\])(?:[^\s:]|(?<! )\s(?! ))*?(?=\s+(?:ENOENT|EACCES|EPERM|EEXIST|not found|no such file|is not recognized|exited with|failed with|script)\b|(?::|[,;!?])(?:\s|$|\b)|\s{2}|$)/gi,
+      /(?:^|[\s"'`([<{=:])(?:\/|~\/|[A-Za-z]:[/\\]|\\\\|\.{1,2}[/\\])(?:[^\s:)]|(?<! )\s(?! ))*?(?=\s+(?:ENOENT|EACCES|EPERM|EEXIST|not found|no such file|is not recognized|exited with|failed with|script)\b|(?::|[,;!?)]|\.(?:\s|$))(?:\s|$|\b)|\s{2}|$)/gi,
       (match) => {
         const leadingChar = match.match(/^[\s"'`([<{=:]/)?.[0] || "";
-        return `${leadingChar}[path]`;
+        const pathPart = match.slice(leadingChar.length);
+        const trailingPunct = pathPart.match(/[).,;:!?]+$/)?.[0] || "";
+        return `${leadingChar}[path]${trailingPunct}`;
       },
     )
     // 3. General paths (single token or standard paths)
-    .replace(/(?:^|[\s"'`([<{=:])(?:[A-Za-z]:[/\\]|~[/\\]|(?:\.{1,2}[/\\]+)|\/(?:[a-zA-Z0-9._~-]+[/\\]))[^\s"'`<>:=]+/g, (match) => {
+    .replace(/(?:^|[\s"'`([<{=:])(?:[A-Za-z]:[/\\]|~[/\\]|(?:\.{1,2}[/\\]+)|\/(?:[a-zA-Z0-9._~-]+[/\\]))[^\s"'`<>:=)]+/g, (match) => {
       const leadingChar = match.match(/^[\s"'`([<{=:]/)?.[0] || "";
-      return `${leadingChar}[path]`;
+      const pathPart = match.slice(leadingChar.length);
+      const trailingPunct = pathPart.match(/[).,;:!?]+$/)?.[0] || "";
+      return `${leadingChar}[path]${trailingPunct}`;
     })
     // 4. Relative multi-segment paths like foo/bar/baz
     .replace(/\b(?:[a-zA-Z0-9_.-]+[/\\]){2,}[a-zA-Z0-9_.-]+/g, "[path]")
@@ -342,6 +381,9 @@ export function sanitizeCliErrorText(text) {
     .replace(/(?:\[path\](?:\s+\[path\])*)/g, "[path]")
     .replace(/\s+/g, " ")
     .trim();
+
+  // 3. Restore preserved URLs
+  return redacted.replace(/__URL_PLACEHOLDER_(\d+)__/g, (_, index) => urls[Number(index)] || "");
 }
 
 function concise(value, maxLength = 800) {

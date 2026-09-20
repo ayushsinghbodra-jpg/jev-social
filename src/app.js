@@ -23,7 +23,7 @@ export async function runSearch(
   }
 
   const config = await readConfig(env);
-  const probe = await probeSocai(config, env);
+  const probe = await probeSocai(config, env, signal);
   const capabilities = probe.capabilities || { instagram: false, tiktok: false, linkedin: false };
 
   if (normalizedPlatform !== "auto") {
@@ -62,7 +62,7 @@ export async function runSearch(
   if (!classification.platform) throw new AppError("This request is not a supported read-only social task.", { code: "UNSUPPORTED_TASK" });
   if (classification.confidence < 0.35) throw new AppError("Jev is uncertain about the platform. Select one explicitly.", { code: "LOW_CLASSIFICATION_CONFIDENCE" });
   const selectedPlatform = classification.platform;
-  const commands = await actionCapabilities({ config, env, platform: selectedPlatform, signal });
+  const commands = await actionCapabilities({ config, env, platform: selectedPlatform, signal, capabilities });
   const searchQuery = extractSearchQuery(request);
   let items = [];
   const actions = [];

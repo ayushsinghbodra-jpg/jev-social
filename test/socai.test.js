@@ -271,6 +271,21 @@ test("sanitizeCliErrorText redacts all types of system paths including /opt, /us
     "socai v0.5.6 (3/3 ready)",
     "Non-path phrases like (3/3 ready) must not be corrupted",
   );
+  assert.equal(
+    sanitizeCliErrorText("See https://example.com/docs/troubleshooting"),
+    "See https://example.com/docs/troubleshooting",
+    "HTTPS URLs must be preserved intact",
+  );
+  assert.equal(
+    sanitizeCliErrorText("See http://internal.local/status"),
+    "See http://internal.local/status",
+    "HTTP URLs must be preserved intact",
+  );
+  assert.equal(
+    sanitizeCliErrorText("Visit https://socai.dev/auth?token=abc for help (logged to /var/log/socai.err)"),
+    "Visit https://socai.dev/auth?token=abc for help (logged to [path])",
+    "URLs must remain intact while local filesystem paths in same error are redacted",
+  );
 });
 
 test("platformSupported returns false when help text mentions 'search' but the subcommand is absent", async () => {
@@ -328,5 +343,66 @@ if (args[0] === "instagram" && args[1] === "search" && args[2] === "--help") {
   }
 });
 
+test("actionCapabilities and platformSupported agree when platform help mentions search but subcommand fails", async () => {
+  const { actionCapabilities, platformSupported } = await import("../src/socai.js");
+  const directory = await mkdtemp(path.join(os.tmpdir(), "jev-social-agree-"));
+  const mock = path.join(directory, "socai-mock.mjs");
+  await writeFile(
+    mock,
+    `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "linkedin" && args[1] === "--help") {
+  console.log("linkedin search is unavailable in this build\\nCommands: profile company");
+} else if (args[0] === "linkedin" && args[1] === "search" && args[2] === "--help") {
+  console.error("unknown command: search");
+  process.exitCode = 1;
+} else {
+  process.exitCode = 2;
+}
+`,
+    { mode: 0o755 },
+  );
+  await chmod(mock, 0o755);
 
+  try {
+    const isSupported = await platformSupported(mock, "linkedin");
+    assert.equal(isSupported, false);
 
+    const env = { ...process.env, SOCAI_BIN: mock };
+    const commandsWithoutCap = await actionCapabilities({ env, platform: "linkedin" });
+    assert.deepEqual(commandsWithoutCap, ["profile", "company"], "Must not include search when subcommand probe fails");
+
+    const commandsWithCap = await actionCapabilities({ env, platform: "linkedin", capabilities: { linkedin: false } });
+    assert.deepEqual(commandsWithCap, ["profile", "company"], "Must respect precomputed capabilities");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("probeSocai forwards cancellation signal promptly without waiting for timeout", async () => {
+  const { probeSocai } = await import("../src/socai.js");
+  const directory = await mkdtemp(path.join(os.tmpdir(), "jev-social-abort-probe-"));
+  const mock = path.join(directory, "socai-mock.mjs");
+  await writeFile(
+    mock,
+    `#!/usr/bin/env node
+setTimeout(() => {}, 30_000);
+`,
+    { mode: 0o755 },
+  );
+  await chmod(mock, 0o755);
+
+  try {
+    const controller = new AbortController();
+    const env = { ...process.env, SOCAI_BIN: mock };
+    const probePromise = probeSocai({}, env, controller.signal);
+    // Abort shortly after spawning
+    setTimeout(() => controller.abort(), 50);
+
+    await assert.rejects(probePromise, (err) => {
+      return err.code === "SOCAI_ABORTED" || err.name === "AbortError";
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

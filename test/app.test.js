@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -248,3 +248,28 @@ else process.exitCode = 2;
   }
 });
 
+test("runSearch aborts promptly when cancelled during preflight probe", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "jev-social-abort-search-"));
+  const mock = path.join(directory, "socai-mock.mjs");
+  await writeFile(
+    mock,
+    `#!/usr/bin/env node
+setTimeout(() => {}, 30_000);
+`,
+    { mode: 0o755 },
+  );
+  await chmod(mock, 0o755);
+
+  const env = { ...process.env, SOCAI_BIN: mock, JEV_SOCIAL_HOME: directory };
+  try {
+    const controller = new AbortController();
+    const searchPromise = runSearch({ query: "art", platform: "instagram" }, { env, signal: controller.signal });
+    setTimeout(() => controller.abort(), 50);
+
+    await assert.rejects(searchPromise, (err) => {
+      return err.code === "SOCAI_ABORTED" || err.name === "AbortError";
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
