@@ -86,8 +86,12 @@ async function handleRequest(request, response, env, mediaRegistry) {
       return sendJson(response, 200, {
         jevConfigured: Boolean(resolveApiKey(config, env)),
         jevModel: env.OPENROUTER_JEV_MODEL || "~typesafe/jev-latest",
-        configPath: getConfigPath(env),
-        socai,
+        socai: {
+          installed: socai.installed,
+          version: socai.version ?? null,
+          capabilities: socai.capabilities,
+          ...(socai.error ? { error: socai.error } : {}),
+        },
       });
     }
     if (request.method === "POST" && url.pathname === "/api/onboard") {

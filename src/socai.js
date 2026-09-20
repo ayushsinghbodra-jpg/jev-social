@@ -30,17 +30,44 @@ export async function probeSocai(config = {}, env = process.env) {
   try {
     const root = await runProcess(bin, ["--help"], { timeoutMs: 15_000, env });
     if (root.code !== 0) {
-      return { installed: false, bin, error: concise(root.stderr || root.stdout) };
+      return {
+        installed: false,
+        version: null,
+        capabilities: { instagram: false, tiktok: false, linkedin: false },
+        error: concise(root.stderr || root.stdout),
+      };
     }
-    const capabilities = {};
+    const version = await getSocaiVersion(bin, env);
+    const capabilities = { instagram: false, tiktok: false, linkedin: false };
     await Promise.all(
       PLATFORMS.map(async (platform) => {
         capabilities[platform] = await platformSupported(bin, platform, env);
       }),
     );
-    return { installed: true, bin, capabilities };
+    return { installed: true, version, capabilities };
   } catch (error) {
-    return { installed: false, bin, error: error.code === "ENOENT" ? "socai executable not found" : error.message };
+    return {
+      installed: false,
+      version: null,
+      capabilities: { instagram: false, tiktok: false, linkedin: false },
+      error: error.code === "ENOENT" ? "socai executable not found" : concise(error.message),
+    };
+  }
+}
+
+/**
+ * Extracts sanitized semver from `socai --version` output.
+ * Assumes the CLI output includes the primary semver token (e.g. `socai 0.5.6` or `0.5.6-beta.1`).
+ * If verbose builds output multiple version numbers, the primary/first semver token is selected.
+ */
+export async function getSocaiVersion(bin, env = process.env) {
+  try {
+    const result = await runProcess(bin, ["--version"], { timeoutMs: 15_000, env });
+    const output = `${result.stdout}\n${result.stderr}`.trim();
+    const match = output.match(/\b\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?\b/);
+    return match ? match[0] : null;
+  } catch {
+    return null;
   }
 }
 
@@ -122,7 +149,7 @@ export async function runSocaiSearch({
       `This socai binary does not expose '${platform} search'. Install a compatible build or set SOCAI_BIN.`,
       {
         code: "SOCAI_CAPABILITY_MISSING",
-        details: { bin, platform },
+        details: { platform },
       },
     );
   }
@@ -152,7 +179,6 @@ export async function runSocaiResearch({
   if (!capability || capability.code !== 0) {
     throw new AppError("This socai binary does not expose 'socai research'. Build the dev-compatible CLI or set SOCAI_BIN.", {
       code: "SOCAI_RESEARCH_CAPABILITY_MISSING",
-      details: { bin },
     });
   }
   return runSocaiJson(bin, buildResearchArgs(platform, task, { maxSteps }), {
@@ -184,7 +210,6 @@ export async function runSocaiTikTokVideos({
   if (!capability || capability.code !== 0) {
     throw new AppError("This socai binary does not expose 'tiktok get-videos'. Install the dev-compatible build or set SOCAI_BIN.", {
       code: "SOCAI_VIDEO_CAPABILITY_MISSING",
-      details: { bin },
     });
   }
   return runSocaiJson(bin, buildTikTokVideoArgs(locators, { numComments }), {
@@ -207,9 +232,8 @@ async function runSocaiJson(bin, args, { env, onProgress, signal, timeoutMs = 8 
       signal,
     });
   } catch (error) {
-    throw new AppError(`Could not start socai CLI: ${error.message}`, {
+    throw new AppError(`Could not start socai CLI: ${concise(error.message)}`, {
       code: "SOCAI_NOT_FOUND",
-      details: { bin },
     });
   }
 
@@ -224,20 +248,18 @@ async function runSocaiJson(bin, args, { env, onProgress, signal, timeoutMs = 8 
     throw new AppError(`socai CLI timed out after ${Math.round(timeoutMs / 60_000)} minutes.`, {
       code: "SOCAI_TIMEOUT",
       status: 504,
-      details: { command },
     });
   }
   if (result.overflowed) {
     throw new AppError("socai CLI output exceeded the 24 MB safety limit.", {
       code: "SOCAI_OUTPUT_TOO_LARGE",
-      details: { command },
     });
   }
   if (result.code !== 0) {
     throw new AppError(`socai CLI failed: ${concise(result.stderr || result.stdout)}`, {
       code: "SOCAI_FAILED",
       status: 502,
-      details: { command, exitCode: result.code, ...(result.signal ? { signal: result.signal } : {}) },
+      details: { exitCode: result.code, ...(result.signal ? { signal: result.signal } : {}) },
     });
   }
 
@@ -278,8 +300,21 @@ export function parseJsonOutput(output) {
   });
 }
 
+export function sanitizeCliErrorText(text) {
+  if (typeof text !== "string") return "";
+  return text
+    .replace(/(?:^|[\s"'`([<{=:])(?:[A-Za-z]:[\\/]|~[\\/]|(?:\.{1,2}[\\/]+)|\/(?:[a-zA-Z0-9._~-]+[\\/]))[^\s"'`<>:=]+/g, (match) => {
+      const leadingChar = match.match(/^[\s"'`([<{=:]/)?.[0] || "";
+      return `${leadingChar}[path]`;
+    })
+    .replace(/\b(?:[a-zA-Z0-9_.-]+[\\/]){2,}[a-zA-Z0-9_.-]+/g, "[path]")
+    .replace(/(?:\[path\](?:\s+\[path\])*)/g, "[path]")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function concise(value, maxLength = 800) {
-  const normalized = String(value || "unknown error").replace(/\s+/g, " ").trim();
+  const normalized = sanitizeCliErrorText(String(value || "unknown error"));
   return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}…` : normalized;
 }
 

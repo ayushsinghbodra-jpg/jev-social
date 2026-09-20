@@ -6,7 +6,7 @@ import { AppError } from "./errors.js";
 import { readConfig, resolveApiKey } from "./config.js";
 import { extractSearchQuery } from "./query.js";
 import { saveRun } from "./runs.js";
-import { actionCapabilities, runSocaiAction } from "./socai.js";
+import { actionCapabilities, probeSocai, runSocaiAction } from "./socai.js";
 
 export async function runSearch(
   { query, platform = "auto", limit = 4, maxSteps = 12 },
@@ -16,14 +16,49 @@ export async function runSearch(
   if (!request) throw new AppError("Search query cannot be empty.", { code: "EMPTY_QUERY" });
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new AppError("limit must be between 1 and 100.", { code: "INVALID_LIMIT" });
   if (!Number.isInteger(maxSteps) || maxSteps < 1 || maxSteps > 30) throw new AppError("maxSteps must be between 1 and 30.", { code: "INVALID_STEP_LIMIT" });
+
+  const normalizedPlatform = (platform || "auto").toLowerCase();
+  if (normalizedPlatform !== "auto" && !["instagram", "tiktok", "linkedin"].includes(normalizedPlatform)) {
+    throw new AppError(`Unsupported platform: ${platform}`, { code: "INVALID_PLATFORM" });
+  }
+
   const config = await readConfig(env);
+  const probe = await probeSocai(config, env);
+  const capabilities = probe.capabilities || { instagram: false, tiktok: false, linkedin: false };
+
+  if (normalizedPlatform !== "auto") {
+    if (!probe.installed || !capabilities[normalizedPlatform]) {
+      throw new AppError(
+        `The installed socai CLI does not support ${normalizedPlatform} search. Install a compatible build or set SOCAI_BIN.`,
+        {
+          code: "SOCAI_CAPABILITY_MISSING",
+          details: { platform: normalizedPlatform },
+        },
+      );
+    }
+  } else {
+    if (!probe.installed || !Object.values(capabilities).some(Boolean)) {
+      throw new AppError(
+        "No supported social search platforms are available in the installed socai CLI.",
+        {
+          code: "SOCAI_CAPABILITY_MISSING",
+        },
+      );
+    }
+  }
+
   const apiKey = resolveApiKey(config, env);
   if (!apiKey && !client) throw new AppError("Set OPENROUTER_API_KEY first.", { code: "ONBOARDING_REQUIRED" });
   const startedAt = Date.now();
   const model = env.OPENROUTER_JEV_MODEL || "~typesafe/jev-latest";
   const decisionOptions = { apiKey, model, client, signal };
   onEvent?.({ stage: "classifying", message: "Jev is choosing the social platform…" });
-  const classification = await classifySearch({ goal: request, requestedPlatform: platform, ...decisionOptions });
+  const classification = await classifySearch({
+    goal: request,
+    requestedPlatform: normalizedPlatform,
+    capabilities,
+    ...decisionOptions,
+  });
   if (!classification.platform) throw new AppError("This request is not a supported read-only social task.", { code: "UNSUPPORTED_TASK" });
   if (classification.confidence < 0.35) throw new AppError("Jev is uncertain about the platform. Select one explicitly.", { code: "LOW_CLASSIFICATION_CONFIDENCE" });
   const selectedPlatform = classification.platform;

@@ -179,3 +179,78 @@ test("runSocaiSearch cancels an in-flight capability probe", async () => {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("probeSocai extracts semver version, evaluates per-platform capabilities, and leaks no paths", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "jev-social-probe-"));
+  const mock = path.join(directory, "socai-mock.mjs");
+  await writeFile(
+    mock,
+    `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "--version") {
+  console.log("socai version 0.5.6-beta.1 (x86_64-linux)");
+} else if (args[0] === "--help") {
+  console.log("socai root help");
+} else if (args[0] === "instagram" && args[1] === "--help") {
+  console.log("Commands: search");
+} else if (args[0] === "tiktok" && args[1] === "--help") {
+  console.log("Commands: search");
+} else if (args[0] === "linkedin" && args[1] === "--help") {
+  console.log("Unknown platform");
+  process.exitCode = 1;
+} else {
+  process.exitCode = 2;
+}
+`,
+    { mode: 0o755 },
+  );
+  await chmod(mock, 0o755);
+
+  try {
+    const env = { ...process.env, SOCAI_BIN: mock };
+    const status = await probeSocai({}, env);
+    assert.equal(status.installed, true);
+    assert.equal(status.version, "0.5.6-beta.1");
+    assert.deepEqual(status.capabilities, {
+      instagram: true,
+      tiktok: true,
+      linkedin: false,
+    });
+    assert.equal(status.bin, undefined);
+    assert.equal(status.configPath, undefined);
+    assert.ok(!JSON.stringify(status).includes(directory));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("sanitizeCliErrorText redacts all types of system paths including /opt, /usr, /var, tildes and spawn ENOENT", async () => {
+  const { sanitizeCliErrorText } = await import("../src/socai.js");
+  
+  assert.equal(
+    sanitizeCliErrorText("Error: cannot exec /opt/homebrew/bin/socai"),
+    "Error: cannot exec [path]",
+  );
+  assert.equal(
+    sanitizeCliErrorText("spawn /usr/local/bin/socai ENOENT"),
+    "spawn [path] ENOENT",
+  );
+  assert.equal(
+    sanitizeCliErrorText("socai: /var/log/socai.err: Permission denied"),
+    "socai: [path]: Permission denied",
+  );
+  assert.equal(
+    sanitizeCliErrorText("cannot load configuration from ~/.socai/config.json"),
+    "cannot load configuration from [path]",
+  );
+  assert.equal(
+    sanitizeCliErrorText("error in ./bin/socai script"),
+    "error in [path] script",
+  );
+  assert.equal(
+    sanitizeCliErrorText("C:\\Program Files\\socai\\socai.exe failed with code 1"),
+    "[path] failed with code 1",
+  );
+});
+
+

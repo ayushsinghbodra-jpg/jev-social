@@ -142,3 +142,109 @@ test("an invented action never reaches the CLI", async () => {
     await assert.rejects(runSearch({query:'find art on Instagram'},{env,client:choices('instagram',()=> 'run_shell')}),{code:'INVALID_JEV_RESPONSE'});
   } finally { await rm(directory,{recursive:true,force:true}); }
 });
+
+test("requesting explicit unsupported platform fails with SOCAI_CAPABILITY_MISSING before any model call", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "jev-social-missing-plat-"));
+  const mock = path.join(directory, "socai-mock.mjs");
+  await writeFile(
+    mock,
+    `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "--version") console.log("socai 0.5.6");
+else if (args[0] === "--help") console.log("socai root");
+else if (args[0] === "instagram" && args[1] === "--help") console.log("Commands: search");
+else if (args[0] === "tiktok" && args[1] === "--help") console.log("Commands: search");
+else if (args[0] === "linkedin" && args[1] === "--help") process.exitCode = 1;
+else process.exitCode = 2;
+`,
+    { mode: 0o755 },
+  );
+
+  const env = { ...process.env, SOCAI_BIN: mock, JEV_SOCIAL_HOME: directory };
+  let modelCallCount = 0;
+  const client = {
+    async systemOne() {
+      modelCallCount += 1;
+      return { answers: { route: { type: "choice", choice: "linkedin_search", confidence: 0.9 } } };
+    },
+  };
+
+  try {
+    await assert.rejects(
+      runSearch({ query: "find AI PMs", platform: "linkedin" }, { env, client }),
+      (error) => {
+        assert.equal(error.code, "SOCAI_CAPABILITY_MISSING");
+        assert.equal(error.details?.platform, "linkedin");
+        assert.ok(!JSON.stringify(error).includes(directory));
+        return true;
+      },
+    );
+    assert.equal(modelCallCount, 0, "No model calls should be made for explicitly unsupported platform");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("auto-routing never offers an unavailable platform to Jev classifier", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "jev-social-autoroute-"));
+  const mock = path.join(directory, "socai-mock.mjs");
+  await writeFile(
+    mock,
+    `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "--version") console.log("socai 0.5.6");
+else if (args[0] === "--help") console.log("socai root");
+else if (args[0] === "instagram" && args[1] === "--help") console.log("Commands: search");
+else if (args[0] === "tiktok" && args[1] === "--help") console.log("Commands: search");
+else if (args[0] === "linkedin" && args[1] === "--help") process.exitCode = 1;
+else if (args[0] === "instagram" && args[1] === "search") {
+  console.log(JSON.stringify({ ok: true, results: [{ url: "https://instagram.com/p/123", title: "Instagram art" }] }));
+}
+else process.exitCode = 2;
+`,
+    { mode: 0o755 },
+  );
+
+  const env = { ...process.env, SOCAI_BIN: mock, JEV_SOCIAL_HOME: directory };
+  let capturedRequest;
+  const client = {
+    async systemOne(request) {
+      if (request.questions.route) {
+        capturedRequest = request;
+        return {
+          answers: {
+            route: { type: "choice", choice: "instagram_search", confidence: 0.95 },
+          },
+        };
+      }
+      const criteria = request.questions.action?.criteria || {};
+      const choice = Object.keys(criteria).find((k) => k === "finish") || Object.keys(criteria)[0];
+      return {
+        answers: {
+          action: { type: "choice", choice, confidence: 0.99 },
+        },
+      };
+    },
+  };
+
+  try {
+    const run = await runSearch({ query: "find creatives", platform: "auto" }, { env, client });
+    assert.equal(run.platform, "instagram");
+    assert.ok(capturedRequest, "Classifier should be invoked for auto routing");
+    assert.deepEqual(
+      capturedRequest.state.supported_workflows,
+      [
+        "Read-only Instagram search via the socai CLI",
+        "Read-only TikTok search via the socai CLI",
+      ],
+      "LinkedIn workflow must not be offered when unavailable",
+    );
+    assert.equal(capturedRequest.questions.route.criteria.linkedin_search, undefined);
+    assert.ok(capturedRequest.questions.route.criteria.instagram_search);
+    assert.ok(capturedRequest.questions.route.criteria.tiktok_search);
+    assert.ok(capturedRequest.questions.route.criteria.unsupported);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
