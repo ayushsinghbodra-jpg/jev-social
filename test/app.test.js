@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { runSearch } from "../src/app.js";
+import { listRuns, readRun } from "../src/runs.js";
 
 async function fixture() {
   const directory = await mkdtemp(path.join(os.tmpdir(), "jev-social-actions-"));
@@ -29,7 +30,7 @@ else if (command === 'search') {
   ]});
 } else if (command === 'get-posts') {
   console.error('run_dir: /tmp/private/run');
-  result({ok:true,posts:[{ok:true,url:args[3],entity:{caption:'A handmade bowl',thumbnail_url:'https://cdn.example/art.jpg',local_path:'/tmp/private/post.json'},comments:[{text:'Love the glaze'}]}]});
+  result({ok:true,posts:[{ok:true,url:args[3],entity:{caption:'A handmade bowl stored at /tmp/private/raw.json',thumbnail_url:'https://cdn.example/art.jpg',local_path:'/tmp/private/post.json',stdout:'raw private output',cookies:[{name:'sid',value:'secret-cookie'}],dom:'<html>private DOM</html>'},comments:[{text:'Love the glaze'}]}]});
 } else if (command === 'get-videos') {
   result({ok:true,videos:[{ok:true,locator:args[3],entity:{url:args[3],title:'Selected video',video:args.includes('--download-media')?{local_path:'/tmp/video.mp4'}:{}}}]});
 } else if (command === 'profile') result({ok:true,profile:{url:args[2],name:'Maker'},posts:[{url:'https://www.instagram.com/p/new/',caption:'New artwork'}]});
@@ -154,4 +155,40 @@ test("an invented action never reaches the CLI", async () => {
   try {
     await assert.rejects(runSearch({query:'find art on Instagram'},{env,client:choices('instagram',()=> 'run_shell')}),{code:'INVALID_JEV_RESPONSE'});
   } finally { await rm(directory,{recursive:true,force:true}); }
+});
+
+test("an interrupted run checkpoints completed actions and public evidence", async () => {
+  const { directory, env } = await fixture();
+  const controller = new AbortController();
+  const client = choices("instagram", (criteria, step) => {
+    if (step === 0) return matching(criteria, /^Search instagram/);
+    return matching(criteria, /Open this post.*\/second\//);
+  });
+  try {
+    await assert.rejects(
+      runSearch(
+        { query: "find handmade art on Instagram" },
+        {
+          env,
+          client,
+          signal: controller.signal,
+          onEvent: (event) => {
+            if (event.stage === "evidence" && event.items.some((item) => item.detail_read)) controller.abort();
+          },
+        },
+      ),
+      { name: "AbortError" },
+    );
+    const history = await listRuns(env);
+    assert.equal(history.length, 1);
+    assert.equal(history[0].status, "interrupted");
+    const checkpoint = await readRun(history[0].id, env);
+    assert.equal(checkpoint.status, "interrupted");
+    assert.deepEqual(checkpoint.actions.map((entry) => entry.status), ["completed", "completed"]);
+    assert.ok(checkpoint.result.items.some((item) => item.detail_read));
+    assert.match(checkpoint.report, /handmade bowl/i);
+    const serialized = JSON.stringify(checkpoint);
+    assert.doesNotMatch(serialized, /\/tmp\/private|local_path|socaiOutputs|stdout|secret-cookie|private DOM/);
+    assert.match(serialized, /\[redacted path\]/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });

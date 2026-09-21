@@ -1,6 +1,8 @@
 import { sourceUrl, targetKind } from "./actions.js";
 
 const record = (value) => value && typeof value === "object" && !Array.isArray(value);
+const PRIVATE_EVIDENCE_KEY = /^(?:stdout|stderr|cookie(?:s|_jar|_string)?|dom|dom_state|(?:inner_|outer_)?html|page_source|storage_state|(?:.*_)?headers|authorization|(?:.*_)?token|api_?key|secret|password|raw(?:_.*)?)$/i;
+const LOCAL_PATH_KEY = /(?:^|_)(?:local_)?path$|(?:^|_)(?:run|output|artifact)_dir$/i;
 
 export function unwrapResult(value) {
   return record(value?.data) ? value.data : value;
@@ -63,16 +65,22 @@ export function resultObservation(raw, captured) {
 export function publicEvidence(value) {
   if (Array.isArray(value)) return value.map(publicEvidence).filter((item) => item !== undefined);
   if (!record(value)) {
-    if (typeof value === "string" && /^(?:\/Users\/|\/home\/|\/tmp\/|[A-Za-z]:\\)/.test(value)) return undefined;
-    return value;
+    return typeof value === "string" ? redactLocalPaths(value) : value;
   }
   const clean = {};
   for (const [key, child] of Object.entries(value)) {
-    if (/(?:^|_)(?:local_)?path$|(?:^|_)(?:run|output|artifact)_dir$/i.test(key)) continue;
+    if (LOCAL_PATH_KEY.test(key) || PRIVATE_EVIDENCE_KEY.test(key)) continue;
     const next = publicEvidence(child);
     if (next !== undefined) clean[key] = next;
   }
   return clean;
+}
+
+function redactLocalPaths(value) {
+  return value
+    .replace(/file:\/\/\/[^\s"'`<>)\]}]+/gi, "[redacted path]")
+    .replace(/\b[A-Za-z]:[\\/][^\s"'`<>)\]}\r\n]+/g, "[redacted path]")
+    .replace(/(^|[\s("'`])\/(?:Users|home|tmp|var|private|etc|usr|opt|bin|Windows|Program Files)\/[^\s"'`<>)\]}\r\n]*/gi, "$1[redacted path]");
 }
 
 export function evidenceReport({ request, platform, items, actions, status, stopReason }) {

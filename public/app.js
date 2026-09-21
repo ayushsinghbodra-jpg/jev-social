@@ -9,6 +9,7 @@ import {
   selectSummaryCards,
 } from "./evidence-preview.js";
 import { bindPromptButtons } from "./prompts.js";
+import { parseRunRoute, resultHash } from "./run-route.js";
 
 const $ = (selector) => document.querySelector(selector);
 const elements = {
@@ -37,6 +38,7 @@ let timer;
 let startedAt = 0;
 let activeController;
 let currentRun;
+let restorePoll;
 
 elements.searchForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -61,13 +63,13 @@ elements.searchForm.addEventListener("submit", async (event) => {
     if (error.name !== "AbortError") showError(error);
   } finally {
     activeController = undefined;
-    stopTimer();
+    if (elements.resultView.classList.contains("is-running")) stopTimer();
     button.disabled = false;
   }
 });
 
 $("#back-to-search").addEventListener("click", () => {
-  if (location.hash === "#results") history.back();
+  if (parseRunRoute(location.hash)) history.back();
   else showSearchView();
 });
 elements.downloadReportBtn?.addEventListener("click", () => {
@@ -87,11 +89,11 @@ elements.dialog.addEventListener("click", (event) => {
 });
 
 window.addEventListener("popstate", () => {
-  if (location.hash === "#results") showResultView();
+  if (parseRunRoute(location.hash)) void restoreRunFromRoute();
   else showSearchView();
 });
 
-void refreshStatus();
+void initialize();
 bindPromptButtons({
   buttons: document.querySelectorAll(".prompt-example-btn"),
   queryElement: $("#query"),
@@ -100,6 +102,10 @@ bindPromptButtons({
 
 function handleStreamEvent(event) {
   if (event.stage === "result") return;
+  if (event.stage === "started" && event.run?.id) {
+    history.replaceState({ view: "results", runId: event.run.id }, "", `${location.pathname}${location.search}${resultHash(event.run.id)}`);
+    return;
+  }
   if (event.stage === "error") {
     const error = new Error(event.error?.message || "The social research run failed.");
     error.code = event.error?.code;
@@ -131,8 +137,8 @@ function handleStreamEvent(event) {
   showActivity(titles[event.stage] || "socai is working", event.message || descriptions[event.stage] || "Research is in progress.");
 }
 
-function startTimer() {
-  startedAt = performance.now();
+function startTimer(initialMs = 0) {
+  startedAt = performance.now() - Math.max(0, Number(initialMs) || 0);
   clearInterval(timer);
   updateTimer();
   timer = setInterval(updateTimer, 100);
@@ -152,11 +158,12 @@ function updateTimer() {
 function showResultView({ push = false } = {}) {
   elements.searchView.classList.add("hidden");
   elements.resultView.classList.remove("hidden");
-  if (push && location.hash !== "#results") history.pushState({ view: "results" }, "", `${location.pathname}${location.search}#results`);
+  if (push && !parseRunRoute(location.hash)) history.pushState({ view: "results" }, "", `${location.pathname}${location.search}${resultHash()}`);
 }
 
 function showSearchView() {
   activeController?.abort();
+  clearTimeout(restorePoll);
   currentRun = undefined;
   if (elements.downloadReportBtn) {
     elements.downloadReportBtn.disabled = true;
@@ -168,6 +175,42 @@ function showSearchView() {
   elements.resultView.classList.remove("has-live-evidence", "is-running");
   clearError();
   $("#query").focus();
+}
+
+async function initialize() {
+  const status = refreshStatus();
+  const restored = parseRunRoute(location.hash) ? restoreRunFromRoute() : Promise.resolve();
+  await Promise.all([status, restored]);
+}
+
+async function restoreRunFromRoute() {
+  const route = parseRunRoute(location.hash);
+  if (!route) return;
+  const requestedHash = location.hash;
+  clearTimeout(restorePoll);
+  showResultView();
+  try {
+    let id = route.id;
+    if (!id) {
+      const history = await api("/api/runs");
+      if (location.hash !== requestedHash) return;
+      id = history.runs?.[0]?.id || "";
+    }
+    if (!id) {
+      resetLiveWorkspace();
+      $("#result-title").textContent = "No saved research yet";
+      return;
+    }
+    const run = await api(`/api/runs/${encodeURIComponent(id)}`);
+    if (location.hash !== requestedHash) return;
+    history.replaceState({ view: "results", runId: id }, "", `${location.pathname}${location.search}${resultHash(id)}`);
+    renderRun(run);
+    if (run.status === "running") {
+      restorePoll = setTimeout(() => void restoreRunFromRoute(), 750);
+    }
+  } catch (error) {
+    showError(error);
+  }
 }
 
 async function refreshStatus() {
@@ -224,9 +267,12 @@ function renderRun(run) {
   elements.activity.classList.add("hidden");
   elements.resultView.classList.remove("has-live-evidence", "is-running");
   elements.reportSection.classList.remove("hidden");
-  stopTimer(run.elapsedMs);
+  if (run.status === "running") startTimer(run.elapsedMs);
+  else stopTimer(run.elapsedMs);
   $("#result-title").textContent = run.request || run.query || "Social results";
-  $("#run-status").textContent = run.status && run.status !== "completed" ? `Partial results · ${run.stopReason}` : "";
+  $("#run-status").textContent = run.status === "running"
+    ? "Research in progress · restored from the latest checkpoint"
+    : run.status && run.status !== "completed" ? `Partial results · ${run.stopReason}` : "";
   $("#action-list").replaceChildren(...(run.actions || []).map((step) => element("li", "", `${step.action.label} · ${step.status}`)));
   $("#action-history").classList.toggle("hidden", !run.actions?.length);
 
