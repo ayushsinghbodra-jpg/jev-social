@@ -186,4 +186,3 @@ test("updatePromptButtons visibly disables unsupported platforms with accessible
   assert.equal(attributes.has("aria-description"), false);
   assert.equal(attributes.has("aria-disabled"), false);
 });
-

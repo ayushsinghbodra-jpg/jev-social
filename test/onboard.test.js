@@ -40,4 +40,3 @@ test("saveOnboarding reports the resolved socai bin path for CLI output", async 
     await rm(directory, { recursive: true, force: true });
   }
 });
-

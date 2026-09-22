@@ -8,15 +8,21 @@ const PLATFORMS = ["instagram", "tiktok", "linkedin"];
 export async function actionCapabilities({ config = {}, env = process.env, platform, signal, capabilities }) {
   if (!PLATFORMS.includes(platform)) throw new AppError("Unsupported platform.", { code: "INVALID_PLATFORM" });
   const bin = await resolveSocaiBin(config, env);
-  const result = await runProcess(bin, [platform, "--help"], { env, signal, timeoutMs: 15_000 });
-  if (result.aborted) throw abortedError();
-  if (result.code !== 0 || result.timedOut) throw new AppError(`Could not read socai ${platform} commands.`, { code: "SOCAI_CAPABILITY_MISSING" });
-  const help = `${result.stdout}\n${result.stderr}`;
-  const names = ["search", "get-posts", "get-videos", "profile", "author", "company", "history", "page_state"];
 
   const isSearchSupported = capabilities && typeof capabilities[platform] === "boolean"
     ? capabilities[platform]
     : await platformSupported(bin, platform, env, signal);
+
+  const result = await runProcess(bin, [platform, "--help"], { env, signal, timeoutMs: 15_000 });
+  if (result.aborted) throw abortedError();
+  if (result.code !== 0 || result.timedOut) {
+    if (isSearchSupported) {
+      return ["search"];
+    }
+    throw new AppError(`Could not read socai ${platform} commands.`, { code: "SOCAI_CAPABILITY_MISSING" });
+  }
+  const help = `${result.stdout}\n${result.stderr}`;
+  const names = ["search", "get-posts", "get-videos", "profile", "author", "company", "history", "page_state"];
 
   const discovered = names.filter((name) => new RegExp(`(?:^|\\s)${name}(?=\\s|$)`, "m").test(help));
   if (!isSearchSupported) {
@@ -341,16 +347,74 @@ export function parseJsonOutput(output) {
   });
 }
 
+function isPathLike(val) {
+  if (!val) return false;
+  let decoded = val;
+  try {
+    decoded = decodeURIComponent(val);
+  } catch {}
+  return (
+    /^[A-Za-z]:[/\\]/i.test(decoded) ||
+    /^~[/\\]/.test(decoded) ||
+    /^\.{1,2}[/\\]/.test(decoded) ||
+    /^\/(?:Users|home|root|tmp|var|opt|usr|etc|Volumes|private|mnt|media|srv|dev|proc|sys)\b/i.test(decoded) ||
+    /^(?:\/[a-zA-Z0-9._~-]+){2,}/.test(decoded) ||
+    /^[/\\]{2}/.test(decoded) ||
+    /\b[A-Za-z]:[/\\]/i.test(decoded) ||
+    /\b(?:[a-zA-Z0-9_.-]+[/\\]){2,}[a-zA-Z0-9_.-]+/.test(decoded)
+  );
+}
+
+function sanitizeUrl(urlStr) {
+  try {
+    const url = new URL(urlStr);
+    if (url.search) {
+      const parts = url.search.slice(1).split("&");
+      const sanitizedParts = parts.map((part) => {
+        const eqIdx = part.indexOf("=");
+        if (eqIdx === -1) {
+          return isPathLike(part) ? "[path]" : part;
+        }
+        const key = part.slice(0, eqIdx);
+        const val = part.slice(eqIdx + 1);
+        return isPathLike(val) ? `${key}=[path]` : part;
+      });
+      url.search = `?${sanitizedParts.join("&")}`;
+    }
+    if (url.hash) {
+      const hashContent = url.hash.slice(1);
+      if (hashContent.includes("&") || hashContent.includes("=")) {
+        const parts = hashContent.split("&");
+        const sanitizedParts = parts.map((part) => {
+          const eqIdx = part.indexOf("=");
+          if (eqIdx === -1) {
+            return isPathLike(part) ? "[path]" : part;
+          }
+          const key = part.slice(0, eqIdx);
+          const val = part.slice(eqIdx + 1);
+          return isPathLike(val) ? `${key}=[path]` : part;
+        });
+        url.hash = `#${sanitizedParts.join("&")}`;
+      } else if (isPathLike(hashContent)) {
+        url.hash = "#[path]";
+      }
+    }
+    return url.toString().replace(/%5Bpath%5D/gi, "[path]");
+  } catch {
+    return urlStr;
+  }
+}
+
 export function sanitizeCliErrorText(text) {
   if (typeof text !== "string") return "";
 
-  // 1. Preserve HTTP/HTTPS URLs by replacing with temporary placeholders
+  // 1. Preserve HTTP/HTTPS URLs by replacing with temporary placeholders after sanitizing query/fragment paths
   const urls = [];
   const withUrlsPreserved = text.replace(/https?:\/\/[^\s"'`<>]+/gi, (url) => {
     const match = url.match(/^(.*?)([.,;:!?)]*)$/);
     const cleanUrl = match ? match[1] : url;
     const trailing = match ? match[2] : "";
-    urls.push(cleanUrl);
+    urls.push(sanitizeUrl(cleanUrl));
     return `__URL_PLACEHOLDER_${urls.length - 1}__${trailing}`;
   });
 

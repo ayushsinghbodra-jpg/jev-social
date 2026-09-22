@@ -225,7 +225,7 @@ if (args[0] === "--version") {
 
 test("sanitizeCliErrorText redacts all types of system paths including /opt, /usr, /var, tildes and spawn ENOENT", async () => {
   const { sanitizeCliErrorText } = await import("../src/socai.js");
-  
+
   assert.equal(
     sanitizeCliErrorText("Error: cannot exec /opt/homebrew/bin/socai"),
     "Error: cannot exec [path]",
@@ -285,6 +285,21 @@ test("sanitizeCliErrorText redacts all types of system paths including /opt, /us
     sanitizeCliErrorText("Visit https://socai.dev/auth?token=abc for help (logged to /var/log/socai.err)"),
     "Visit https://socai.dev/auth?token=abc for help (logged to [path])",
     "URLs must remain intact while local filesystem paths in same error are redacted",
+  );
+  assert.equal(
+    sanitizeCliErrorText("Docs https://example.com/help?log=/Users/alice/private.txt"),
+    "Docs https://example.com/help?log=[path]",
+    "Query parameters containing local paths must be redacted",
+  );
+  assert.equal(
+    sanitizeCliErrorText("Docs https://example.com/help#C:\\Users\\Alice\\secret.txt"),
+    "Docs https://example.com/help#[path]",
+    "Fragments containing local paths must be redacted",
+  );
+  assert.equal(
+    sanitizeCliErrorText("See https://example.com/help?topic=login&path=C:%5CUsers%5CAlice%5Csecret.txt"),
+    "See https://example.com/help?topic=login&path=[path]",
+    "Preserve non-path query parameters while redacting path-valued query parameters",
   );
 });
 
@@ -374,6 +389,42 @@ if (args[0] === "linkedin" && args[1] === "--help") {
 
     const commandsWithCap = await actionCapabilities({ env, platform: "linkedin", capabilities: { linkedin: false } });
     assert.deepEqual(commandsWithCap, ["profile", "company"], "Must respect precomputed capabilities");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("actionCapabilities and platformSupported agree in positive-probe/failed-parent case", async () => {
+  const { actionCapabilities, platformSupported } = await import("../src/socai.js");
+  const directory = await mkdtemp(path.join(os.tmpdir(), "jev-social-pos-agree-"));
+  const mock = path.join(directory, "socai-mock.mjs");
+  await writeFile(
+    mock,
+    `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "instagram" && args[1] === "search" && args[2] === "--help") {
+  console.log("Usage: socai instagram search <query>");
+} else if (args[0] === "instagram" && args[1] === "--help") {
+  console.error("parent platform help failed");
+  process.exitCode = 1;
+} else {
+  process.exitCode = 2;
+}
+`,
+    { mode: 0o755 },
+  );
+  await chmod(mock, 0o755);
+
+  try {
+    const isSupported = await platformSupported(mock, "instagram");
+    assert.equal(isSupported, true, "Concrete search probe succeeding must make platform supported");
+
+    const env = { ...process.env, SOCAI_BIN: mock };
+    const commandsWithoutCap = await actionCapabilities({ env, platform: "instagram" });
+    assert.deepEqual(commandsWithoutCap, ["search"], "Must expose search when subcommand succeeds despite parent failure");
+
+    const commandsWithCap = await actionCapabilities({ env, platform: "instagram", capabilities: { instagram: true } });
+    assert.deepEqual(commandsWithCap, ["search"], "Must respect precomputed capability and expose search despite parent failure");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

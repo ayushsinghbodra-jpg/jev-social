@@ -198,4 +198,3 @@ test("classifySearch throws SOCAI_CAPABILITY_MISSING when requested platform is 
   );
   assert.equal(called, false, "Model must not be called when platform is not in capabilities");
 });
-

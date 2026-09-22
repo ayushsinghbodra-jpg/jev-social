@@ -123,5 +123,3 @@ export function platformLabel(platform = "") {
   const key = String(platform || "").toLowerCase();
   return PLATFORM_LABELS[key] || (key.charAt(0).toUpperCase() + key.slice(1));
 }
-
-

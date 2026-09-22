@@ -136,12 +136,10 @@ else process.exitCode = 2;
 
 test("/api/status never leaks config path when readConfig fails", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "jev-social-err-status-"));
-  // Use a non-existent or invalid directory path as home to trigger config read failure
+  await writeFile(path.join(directory, "config.json"), "{ invalid JSON syntax !!!");
   const badEnv = {
     ...process.env,
-    JEV_SOCIAL_HOME: path.join(directory, "nonexistent-dir", "sub"),
-    HOME: path.join(directory, "nonexistent-dir", "sub"),
-    SOCAI_HOME: path.join(directory, "nonexistent-dir", "sub"),
+    JEV_SOCIAL_HOME: directory,
   };
   const { server, url } = await startServer({ port: 0, open: false, env: badEnv });
   try {
@@ -149,6 +147,7 @@ test("/api/status never leaks config path when readConfig fails", async () => {
     assert.equal(response.status, 200);
     const body = await response.json();
     assert.equal(body.jevConfigured, false);
+    assert.equal(body.configError, "Configuration could not be read.");
     const text = JSON.stringify(body);
     assert.ok(!text.includes(directory), "Filesystem path must not leak when readConfig fails");
   } finally {
@@ -156,5 +155,3 @@ test("/api/status never leaks config path when readConfig fails", async () => {
     await rm(directory, { recursive: true, force: true });
   }
 });
-
-
