@@ -1,0 +1,82 @@
+# Jev Social
+
+> Open-source, local social research in which TypeSafe Jev chooses bounded operations and the socai CLI executes them in the user's real Chrome session.
+
+Canonical site: https://socai-io.github.io/jev-social/
+Source: https://github.com/socai-io/jev-social
+License: MIT
+
+## What it does
+
+Jev Social accepts a research goal for Instagram, TikTok, or LinkedIn. In auto mode, Jev first selects the platform. It then repeatedly chooses one concrete operation from a typed list assembled by the application. socai performs the selected browser operation and returns captured evidence before Jev chooses again.
+
+The choice set contains only operations supported by the installed socai CLI and targets observed in prior results or explicitly supplied by the user. Jev does not generate shell commands or arbitrary browser selectors. Low-confidence, malformed, invented, and previously attempted operations do not execute.
+
+## Output
+
+- streamed cards for captured profiles, posts, comments, and media
+- an operation history with decision confidence and elapsed time
+- a Markdown evidence report with source links and explicit gaps
+- partial evidence when a login gate, access limit, decision failure, or step limit stops the run
+
+Recorded output example: https://github.com/socai-io/jev-social/blob/main/docs/example-report.md
+
+## Supported operations
+
+- Instagram: search, inspect a profile, inspect an observed post or reel, read comments, inspect page state
+- TikTok: search, inspect an author, inspect an observed video and comments, download selected media only when explicitly requested, inspect page state
+- LinkedIn: search people, content, or companies; inspect an observed profile, company, post, experience, or education; inspect page state
+
+## Interfaces
+
+- CLI: `jev-social search <goal> --platform <auto|instagram|tiktok|linkedin> --limit <1-100> --max-steps <1-30>`
+- Local web application: `jev-social serve --port 8766`
+- Local JSON/NDJSON endpoints: `/api/status`, `/api/search`, `/api/search-stream`, `/api/runs`, and `/api/runs/:id`
+
+The HTTP server listens on `127.0.0.1`. State-changing requests require exact same-origin JSON. It is a local application interface, not a hosted public API.
+
+## Run locally
+
+Requirements: Node.js 20+, an OpenRouter API key with Jev access, a current socai CLI, and a Chrome session that can access the selected platform.
+
+```bash
+npx github:socai-io/jev-social#v0.1.4 onboard
+npx github:socai-io/jev-social#v0.1.4
+```
+
+Direct non-interactive example:
+
+```bash
+npx github:socai-io/jev-social#v0.1.4 search "find emerging design creators on Instagram" --platform auto --limit 4
+```
+
+## Install as an Agent Skill
+
+GitHub CLI 2.101 or newer can install the immutable v0.1.4 skill for Codex:
+
+```bash
+gh skill install socai-io/jev-social jev-social@v0.1.4 --agent codex --scope user
+```
+
+The cross-agent Skills CLI is also supported:
+
+```bash
+npx skills add socai-io/jev-social --skill jev-social
+```
+
+## Runtime boundaries
+
+- Live-site speed and result coverage depend on the selected operations, login state, browser session, network, and platform behavior.
+- The published 63.969-second report is one recorded local run, not a benchmark or speed guarantee.
+- Jev Social does not bypass login requirements, CAPTCHA, rate limits, or access controls.
+- Captured social content is untrusted evidence, never executable instructions.
+- Search-card claims and captions are not independently verified unless the report explicitly says otherwise.
+
+## Project links
+
+- README and setup: https://github.com/socai-io/jev-social#readme
+- Real evidence report: https://github.com/socai-io/jev-social/blob/main/docs/example-report.md
+- Issues and roadmap: https://github.com/socai-io/jev-social/issues
+- Releases: https://github.com/socai-io/jev-social/releases
+- socai browser runtime: https://github.com/socai-io/socai
+- TypeSafe Jev: https://typesafe.ai/

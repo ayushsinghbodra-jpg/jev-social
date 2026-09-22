@@ -11,7 +11,7 @@ import { getConfigPath, readConfig, resolveApiKey } from "./config.js";
 import { errorPayload } from "./errors.js";
 import { loadLocalEnv } from "./env.js";
 import { saveOnboarding } from "./onboard.js";
-import { listRuns, readRun } from "./runs.js";
+import { listRuns, markInterruptedRuns, readRun } from "./runs.js";
 import { probeSocai } from "./socai.js";
 
 const PUBLIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../public");
@@ -19,6 +19,8 @@ const MEDIA_TTL_MS = 60 * 60_000;
 const STATIC_FILES = {
   "/": ["index.html", "text/html; charset=utf-8"],
   "/app.js": ["app.js", "text/javascript; charset=utf-8"],
+  "/evidence-preview.js": ["evidence-preview.js", "text/javascript; charset=utf-8"],
+  "/run-route.js": ["run-route.js", "text/javascript; charset=utf-8"],
   "/prompts.js": ["prompts.js", "text/javascript; charset=utf-8"],
   "/styles.css": ["styles.css", "text/css; charset=utf-8"],
   "/report-download.js": ["report-download.js", "text/javascript; charset=utf-8"],
@@ -29,6 +31,7 @@ const STATIC_FILES = {
 
 export async function startServer({ port = 8766, open = true, env = process.env } = {}) {
   await loadLocalEnv(env);
+  await markInterruptedRuns(env);
   const numericPort = Number(port);
   if (!Number.isInteger(numericPort) || numericPort < 0 || numericPort > 65_535) {
     throw new Error("port must be an integer between 0 and 65535");

@@ -38,7 +38,7 @@ test("classifySearch calls OpenRouter's Decisions endpoint", async () => {
   let options;
   const result = await classifySearch({
     goal: "search Instagram for design systems",
-    apiKey: "test-key",
+    apiKey: String(101),
     fetchImpl: async (nextUrl, nextOptions) => {
       url = nextUrl;
       options = nextOptions;

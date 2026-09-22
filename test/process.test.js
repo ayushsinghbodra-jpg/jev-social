@@ -19,10 +19,10 @@ test("childEnvironment forwards socai/runtime settings but strips API credential
     PATH: "/bin",
     HOME: "/tmp/home",
     SOCAI_HOME: "/tmp/socai",
-    SOCAI_API_KEY: "secret-3",
-    SOCAI_SESSION_TOKEN: "secret-4",
-    TYPESAFE_API_KEY: "secret",
-    OPENROUTER_API_KEY: "secret-2",
+    SOCAI_API_KEY: String(1),
+    SOCAI_SESSION_TOKEN: String(2),
+    TYPESAFE_API_KEY: String(3),
+    OPENROUTER_API_KEY: String(4),
   });
   assert.deepEqual(value, { PATH: "/bin", HOME: "/tmp/home", SOCAI_HOME: "/tmp/socai" });
 });

@@ -1,19 +1,37 @@
-import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import crypto from "node:crypto";
+import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { getHomeDir } from "./config.js";
+
+const writeQueues = new Map();
 
 function runsDir(env = process.env) {
   return path.join(getHomeDir(env), "runs");
 }
 
 export async function saveRun(run, env = process.env) {
+  if (!run?.id || !/^[A-Za-z0-9_.-]+$/.test(run.id)) throw new Error("Run id contains invalid characters.");
   const directory = runsDir(env);
-  await mkdir(directory, { recursive: true, mode: 0o700 });
   const target = path.join(directory, `${run.id}.json`);
-  const temporary = `${target}.${process.pid}.tmp`;
-  await writeFile(temporary, `${JSON.stringify(run, null, 2)}\n`, { mode: 0o600 });
-  await rename(temporary, target);
-  return target;
+  const previous = writeQueues.get(target) || Promise.resolve();
+  const operation = previous.catch(() => {}).then(async () => {
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const temporary = `${target}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
+    try {
+      await writeFile(temporary, `${JSON.stringify(run, null, 2)}\n`, { mode: 0o600 });
+      await rename(temporary, target);
+      return target;
+    } catch (error) {
+      await unlink(temporary).catch(() => {});
+      throw error;
+    }
+  });
+  writeQueues.set(target, operation);
+  try {
+    return await operation;
+  } finally {
+    if (writeQueues.get(target) === operation) writeQueues.delete(target);
+  }
 }
 
 export async function listRuns(env = process.env, limit = 30) {
@@ -36,8 +54,12 @@ export async function listRuns(env = process.env, limit = 30) {
       runs.push({
         id: run.id,
         createdAt: run.createdAt,
+        updatedAt: run.updatedAt,
         query: run.query,
         platform: run.platform,
+        status: run.status,
+        stopReason: run.stopReason,
+        elapsedMs: run.elapsedMs,
         itemCount: countItems(run.result),
       });
     } catch {
@@ -45,6 +67,39 @@ export async function listRuns(env = process.env, limit = 30) {
     }
   }
   return runs;
+}
+
+export async function markInterruptedRuns(env = process.env) {
+  let files;
+  try {
+    files = await readdir(runsDir(env));
+  } catch (error) {
+    if (error?.code === "ENOENT") return 0;
+    throw error;
+  }
+  let changed = 0;
+  for (const name of files.filter((value) => value.endsWith(".json"))) {
+    let run;
+    try {
+      run = JSON.parse(await readFile(path.join(runsDir(env), name), "utf8"));
+    } catch {
+      continue;
+    }
+    if (run.status !== "running") continue;
+    const stopReason = "The local process stopped before this run completed.";
+    const report = String(run.report || "").replace("Research is still in progress.", stopReason);
+    await saveRun({
+      ...run,
+      updatedAt: new Date().toISOString(),
+      status: "interrupted",
+      stopReason,
+      result: { ...(run.result || {}), ok: false },
+      report,
+      finalSocaiOutput: report,
+    }, env);
+    changed += 1;
+  }
+  return changed;
 }
 
 export async function readRun(id, env = process.env) {

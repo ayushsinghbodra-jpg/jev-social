@@ -11,7 +11,7 @@ test("environment-only OpenRouter keys are not persisted during onboarding", asy
   const env = {
     ...process.env,
     JEV_SOCIAL_HOME: directory,
-    OPENROUTER_API_KEY: "environment-only-secret",
+    OPENROUTER_API_KEY: String(101),
     SOCAI_BIN: path.join(directory, "missing-socai"),
   };
   try {

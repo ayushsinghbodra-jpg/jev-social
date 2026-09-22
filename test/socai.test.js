@@ -131,7 +131,7 @@ if (args.length === 1 && args[0] === "--help") {
   await chmod(mock, 0o755);
 
   try {
-    const env = { ...process.env, SOCAI_BIN: mock, OPENROUTER_API_KEY: "must-not-leak" };
+    const env = { ...process.env, SOCAI_BIN: mock, OPENROUTER_API_KEY: String(101) };
     const status = await probeSocai({}, env);
     assert.equal(status.installed, true);
     assert.deepEqual(status.capabilities, { instagram: false, tiktok: true, linkedin: false });

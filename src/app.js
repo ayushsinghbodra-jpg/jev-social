@@ -64,85 +64,132 @@ export async function runSearch(
   const selectedPlatform = classification.platform;
   const commands = await actionCapabilities({ config, env, platform: selectedPlatform, signal, capabilities });
   const searchQuery = extractSearchQuery(request);
+  const createdAt = new Date().toISOString();
+  const id = `${createdAt.replace(/[-:.TZ]/g, "").slice(0, 14)}-${crypto.randomBytes(3).toString("hex")}`;
   let items = [];
   const actions = [];
   const executions = [];
-  let status = "step_limit";
-  let stopReason = `Reached the limit of ${maxSteps} operations before Jev chose to finish.`;
+  let status = "running";
+  let stopReason = "Research is still in progress.";
+  let activeEntry;
+
+  const checkpoint = async () => {
+    const publicRequest = publicEvidence(request);
+    const publicQuery = publicEvidence(searchQuery);
+    const publicItems = publicEvidence(items);
+    const publicStopReason = publicEvidence(stopReason);
+    const report = evidenceReport({ request: publicRequest, platform: selectedPlatform, items: publicItems, actions, status, stopReason: publicStopReason });
+    const run = {
+      id, createdAt, updatedAt: new Date().toISOString(), request: publicRequest, query: publicQuery,
+      requestedPlatform: platform, platform: selectedPlatform,
+      classification: publicEvidence(classification),
+      actions: actions.map(({ command: _command, ...entry }) => publicEvidence(entry)),
+      status, stopReason: publicStopReason, maxSteps,
+      socaiExitCode: executions.at(-1)?.exitCode ?? null,
+      socaiElapsedMs: executions.reduce((sum, execution) => sum + execution.elapsedMs, 0),
+      jevElapsedMs: classification.elapsedMs + actions.reduce((sum, entry) => sum + (entry.jevElapsedMs || 0), 0),
+      elapsedMs: Date.now() - startedAt,
+      result: { ok: status === "completed", query: publicQuery, items: publicItems },
+      report,
+      finalSocaiOutput: report,
+    };
+    await saveRun(run, env);
+    return run;
+  };
+
+  await checkpoint();
+  onEvent?.({ stage: "started", run: { id, createdAt, query: searchQuery, platform: selectedPlatform, status } });
 
   // Every operation, including which exact result to open, is chosen from the
   // current observation. The model never supplies executable shell or JS.
-  for (let step = 0; step < maxSteps; step += 1) {
-    signal?.throwIfAborted();
-    const candidates = availableActions({ platform: selectedPlatform, query: searchQuery, goal: request, items, history: actions, commands, limit });
-    onEvent?.({ stage: "planning", message: "Jev is choosing the next operation…", step: step + 1 });
-    let decision;
-    try {
-      decision = await chooseAction({ goal: request, platform: selectedPlatform, actions: candidates, history: actions, items, limit, remainingSteps: maxSteps - step, ...decisionOptions });
-    } catch (error) {
-      if (!actions.length || signal?.aborted) throw error;
-      status = "decision_failed";
-      stopReason = error.message;
-      break;
-    }
-    const action = decision.action;
-    const entry = {
-      step: step + 1, action, confidence: decision.confidence,
-      model: decision.model, usage: decision.usage, jevElapsedMs: decision.elapsedMs,
-      status: "selected",
-    };
-    if (action.kind === "finish") {
-      entry.status = "completed";
-      actions.push(entry);
-      status = items.length && !actions.some((item) => item.status === "failed") ? "completed" : "partial";
-      stopReason = items.length ? "Jev chose to finish with the evidence captured so far." : "Jev stopped without usable evidence.";
-      break;
-    }
-    const stage = action.downloadMedia ? "downloading" : action.kind === "search" ? "searching" : "reading";
-    onEvent?.({ stage, message: action.label, step: step + 1, action: { kind: action.kind, target: action.target, cli: buildActionArgs(action) } });
-    try {
-      const execution = await runSocaiAction({
-        action, config, env, signal,
-        onProgress: (message) => {
-          const clean = safeProgress(message);
-          if (clean) onEvent?.({ stage, message: clean });
-        },
-      });
-      executions.push(execution);
-      const captured = extractEvidence(execution.data, action);
-      items = mergeEvidence(items, captured);
-      const observation = resultObservation(execution.data, captured);
-      Object.assign(entry, { command: execution.command, elapsedMs: execution.elapsedMs, observation, status: observation.ok ? "completed" : "failed" });
-      actions.push(entry);
-      if (captured.length) onEvent?.({ stage: "evidence", items: publicEvidence(items), message: `Captured ${items.length} records.` });
-      if (observation.blocked) {
-        status = "blocked";
-        stopReason = `The platform requires attention: ${observation.reason || observation.status || "login or access check"}.`;
+  try {
+    for (let step = 0; step < maxSteps; step += 1) {
+      signal?.throwIfAborted();
+      const candidates = availableActions({ platform: selectedPlatform, query: searchQuery, goal: request, items, history: actions, commands, limit });
+      onEvent?.({ stage: "planning", message: "Jev is choosing the next operation…", step: step + 1 });
+      let decision;
+      try {
+        decision = await chooseAction({ goal: request, platform: selectedPlatform, actions: candidates, history: actions, items, limit, remainingSteps: maxSteps - step, ...decisionOptions });
+      } catch (error) {
+        if (!actions.length || signal?.aborted) throw error;
+        status = "decision_failed";
+        stopReason = safeProgress(error.message) || "Jev could not choose another safe operation.";
         break;
       }
-    } catch (error) {
-      signal?.throwIfAborted();
-      Object.assign(entry, { status: "failed", observation: { ok: false, code: error.code, error: safeProgress(error.message) || "Browser operation failed." } });
+      const action = decision.action;
+      const entry = {
+        step: step + 1, action, confidence: decision.confidence,
+        model: decision.model, usage: decision.usage, jevElapsedMs: decision.elapsedMs,
+        status: "selected",
+      };
+      activeEntry = entry;
       actions.push(entry);
-      onEvent?.({ stage: "planning", message: "The operation failed. Jev is considering the remaining options." });
+      if (action.kind === "finish") {
+        entry.status = "completed";
+        status = items.length && !actions.some((item) => item.status === "failed") ? "completed" : "partial";
+        stopReason = items.length ? "Jev chose to finish with the evidence captured so far." : "Jev stopped without usable evidence.";
+        await checkpoint();
+        activeEntry = undefined;
+        break;
+      }
+      await checkpoint();
+      const stage = action.downloadMedia ? "downloading" : action.kind === "search" ? "searching" : "reading";
+      onEvent?.({ stage, message: action.label, step: step + 1, action: { kind: action.kind, target: action.target, cli: buildActionArgs(action) } });
+      try {
+        const execution = await runSocaiAction({
+          action, config, env, signal,
+          onProgress: (message) => {
+            const clean = safeProgress(message);
+            if (clean) onEvent?.({ stage, message: clean });
+          },
+        });
+        executions.push(execution);
+        const captured = extractEvidence(execution.data, action);
+        items = mergeEvidence(items, captured);
+        const observation = resultObservation(execution.data, captured);
+        Object.assign(entry, { command: execution.command, elapsedMs: execution.elapsedMs, observation, status: observation.ok ? "completed" : "failed" });
+        if (observation.blocked) {
+          status = "blocked";
+          stopReason = `The platform requires attention: ${observation.reason || observation.status || "login or access check"}.`;
+        }
+        await checkpoint();
+        if (captured.length) onEvent?.({ stage: "evidence", items: publicEvidence(items), message: `Captured ${items.length} records.` });
+        activeEntry = undefined;
+        if (observation.blocked) break;
+      } catch (error) {
+        signal?.throwIfAborted();
+        Object.assign(entry, { status: "failed", observation: { ok: false, code: error.code, error: safeProgress(error.message) || "Browser operation failed." } });
+        await checkpoint();
+        activeEntry = undefined;
+        onEvent?.({ stage: "planning", message: "The operation failed. Jev is considering the remaining options." });
+      }
     }
+  } catch (error) {
+    if (signal?.aborted || error?.name === "AbortError") {
+      if (activeEntry?.status === "selected") activeEntry.status = "interrupted";
+      status = "interrupted";
+      stopReason = "The browser stream closed before this run completed.";
+      await checkpoint();
+      throw error;
+    }
+    if (activeEntry?.status === "selected") activeEntry.status = "failed";
+    status = "failed";
+    stopReason = safeProgress(error.message) || "The research run failed before completion.";
+    await checkpoint();
+    throw error;
   }
-  const report = evidenceReport({ request, platform: selectedPlatform, items, actions, status, stopReason });
+  if (status === "running") {
+    status = "step_limit";
+    stopReason = `Reached the limit of ${maxSteps} operations before Jev chose to finish.`;
+  }
+  const stored = await checkpoint();
   const run = {
-    id: `${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${crypto.randomBytes(3).toString("hex")}`,
-    createdAt: new Date().toISOString(), request, query: searchQuery, requestedPlatform: platform,
-    platform: selectedPlatform, classification, actions, status, stopReason, maxSteps,
+    ...stored, classification, actions,
     command: executions.at(-1)?.command || "", evidenceCommand: executions[0]?.command || "",
     evidenceCommands: executions.map((execution) => execution.command),
-    socaiExitCode: executions.at(-1)?.exitCode ?? null,
-    socaiElapsedMs: executions.reduce((sum, execution) => sum + execution.elapsedMs, 0),
-    jevElapsedMs: classification.elapsedMs + actions.reduce((sum, entry) => sum + entry.jevElapsedMs, 0),
-    elapsedMs: Date.now() - startedAt,
     result: { ok: status === "completed", query: searchQuery, items },
-    report, finalSocaiOutput: report,
     socaiOutputs: executions.map((execution) => ({ command: execution.command, elapsedMs: execution.elapsedMs, text: execution.stdout })),
   };
-  await saveRun(run, env);
   onEvent?.({ stage: "complete", status, message: status === "completed" ? "Evidence ready." : `Partial evidence saved. ${stopReason}` });
   return run;
 }
