@@ -30,6 +30,8 @@ else if (command === 'search') {
   ]});
 } else if (command === 'get-posts') {
   console.error('run_dir: /tmp/private/run');
+  console.error('cannot open /opt/company/private/config.json; retrying safely');
+  console.error('artifact_path=/tmp/private/report.md but upload failed');
   result({ok:true,posts:[{ok:true,url:args[3],entity:{caption:'A handmade bowl stored at /tmp/private/raw.json',thumbnail_url:'https://cdn.example/art.jpg',local_path:'/tmp/private/post.json',stdout:'raw private output',cookies:[{name:'sid',value:'secret-cookie'}],dom:'<html>private DOM</html>'},comments:[{text:'Love the glaze'}]}]});
 } else if (command === 'get-videos') {
   result({ok:true,videos:[{ok:true,locator:args[3],entity:{url:args[3],title:'Selected video',video:args.includes('--download-media')?{local_path:'/tmp/video.mp4'}:{}}}]});
@@ -78,7 +80,10 @@ test("runSearch lets Jev choose a specific post, then finish without an autonomo
     assert.ok(!run.evidenceCommands.some((command) => /research|\/first\//.test(command)));
     assert.match(run.report, /Love the glaze/);
     assert.ok(events.some((event) => event.stage === 'planning'));
+    assert.ok(events.some((event) => event.message === 'cannot open [path]; retrying safely'));
+    assert.ok(events.some((event) => event.message === 'artifact_path=[path] but upload failed'));
     assert.ok(!JSON.stringify(events).includes('/tmp/private'));
+    assert.ok(!JSON.stringify(events).includes('/opt/company'));
     assert.ok(!run.result.items.some((item) => item.url.includes('evil.example')));
   } finally { await rm(directory,{recursive:true,force:true}); }
 });

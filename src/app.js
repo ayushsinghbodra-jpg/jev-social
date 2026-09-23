@@ -6,7 +6,7 @@ import { AppError } from "./errors.js";
 import { readConfig, resolveApiKey } from "./config.js";
 import { extractSearchQuery } from "./query.js";
 import { saveRun } from "./runs.js";
-import { actionCapabilities, probeSocai, runSocaiAction } from "./socai.js";
+import { actionCapabilities, probeSocai, runSocaiAction, sanitizeCliErrorText } from "./socai.js";
 
 export async function runSearch(
   { query, platform = "auto", limit = 4, maxSteps = 12 },
@@ -195,11 +195,11 @@ export async function runSearch(
 }
 
 function safeProgress(message) {
-  const text = String(message || "").trim();
-  if (!text || text.startsWith("@@SOCAI_EVENT@@") || /^[{[]/.test(text)) return "";
-  if (/^\d{4}-\d{2}-\d{2}T\S+\s+(?:TRACE|DEBUG|INFO|WARN|ERROR)\b/.test(text)) return "";
-  if (/^at\s+(?:<anonymous>|[\w.]+)(?::|\s|$)/.test(text)) return "";
-  if (/\b(?:run_dir|report_path|local_path|output_dir|artifact_path)\b\s*[:=]/i.test(text)) return "";
-  if (/(?:^|\s)(?:\/Users\/|\/home\/|\/tmp\/|[A-Za-z]:\\)/.test(text)) return "";
-  return text;
+  const raw = String(message || "").trim();
+  if (!raw || raw.startsWith("@@SOCAI_EVENT@@") || /^[{[]/.test(raw)) return "";
+  if (/^\d{4}-\d{2}-\d{2}T\S+\s+(?:TRACE|DEBUG|INFO|WARN|ERROR)\b/.test(raw)) return "";
+  if (/^at\s+(?:<anonymous>|[\w.]+)(?::|\s|$)/.test(raw)) return "";
+  const sanitized = sanitizeCliErrorText(raw);
+  if (/^(?:run_dir|report_path|local_path|output_dir|artifact_path)\s*[:=]\s*\[path\]$/i.test(sanitized)) return "";
+  return sanitized;
 }

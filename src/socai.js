@@ -350,17 +350,29 @@ export function parseJsonOutput(output) {
 function isPathLike(val) {
   if (!val) return false;
   let decoded = val;
-  try {
-    decoded = decodeURIComponent(val);
-  } catch {}
+  for (let pass = 0; pass < 3; pass += 1) {
+    try {
+      const next = decodeURIComponent(decoded);
+      if (next === decoded) break;
+      decoded = next;
+    } catch {
+      break;
+    }
+  }
   return (
     /^[A-Za-z]:[/\\]/i.test(decoded) ||
+    /^[A-Za-z]:[^/\\\s]+[/\\]/i.test(decoded) ||
+    /^file:\/\/\//i.test(decoded) ||
     /^~[/\\]/.test(decoded) ||
     /^\.{1,2}[/\\]/.test(decoded) ||
+    /^[/\\](?![/\\])[^/?#\\]+(?:[/\\][^/?#\\]+)*$/.test(decoded) ||
+    /^\/(?!\/)[^/?#]+(?:[/\\][^/?#]+)*$/.test(decoded) ||
     /^\/(?:Users|home|root|tmp|var|opt|usr|etc|Volumes|private|mnt|media|srv|dev|proc|sys)\b/i.test(decoded) ||
     /^(?:\/[a-zA-Z0-9._~-]+){2,}/.test(decoded) ||
     /^[/\\]{2}/.test(decoded) ||
     /\b[A-Za-z]:[/\\]/i.test(decoded) ||
+    /^[a-zA-Z0-9_.-]+[/\\].+$/.test(decoded) ||
+    /^[a-zA-Z0-9_.-]+[/\\][a-zA-Z0-9_.-]+(?:[/\\][a-zA-Z0-9_.-]+)*$/.test(decoded) ||
     /\b(?:[a-zA-Z0-9_.-]+[/\\]){2,}[a-zA-Z0-9_.-]+/.test(decoded)
   );
 }
@@ -420,11 +432,21 @@ export function sanitizeCliErrorText(text) {
 
   // 2. Perform path redactions
   const redacted = withUrlsPreserved
-    // 1. Quoted paths
+    // 1. Local file URLs
+    .replace(/\bfile:\/\/\/?(?:[A-Za-z]:)?[^\s"'`<>),;!?]+/gi, "[path]")
+    // 2. Quoted paths
     .replace(/(["'`])(?:\/|~\/|[A-Za-z]:[/\\]|\\\\|\.{1,2}[/\\])[^"'`]*\1/g, "[path]")
-    // 2. Unquoted paths with spaces (e.g. /Volumes/My Disk/socai or C:\Program Files\socai\socai.exe)
+    // 3. Unquoted paths with spaces that end in a filename extension
     .replace(
-      /(?:^|[\s"'`([<{=:])(?:\/|~\/|[A-Za-z]:[/\\]|\\\\|\.{1,2}[/\\])(?:[^\s:)]|(?<! )\s(?! ))*?(?=\s+(?:ENOENT|EACCES|EPERM|EEXIST|not found|no such file|is not recognized|exited with|failed with|script)\b|(?::|[,;!?)]|\.(?:\s|$))(?:\s|$|\b)|\s{2}|$)/gi,
+      /(?:^|[\s"'`([<{=:])(?:\/|~\/|[A-Za-z]:[/\\]|\\\\|\.{1,2}[/\\]|[a-zA-Z][a-zA-Z0-9_.-]*[/\\])[^\s:)]*(?:[ \t][^\s:)]*)+\.[a-zA-Z0-9_-]{1,16}(?=\s|[,;!?)]|$)/gi,
+      (match) => {
+        const leadingChar = match.match(/^[\s"'`([<{=:]/)?.[0] || "";
+        return `${leadingChar}[path]`;
+      },
+    )
+    // 4. Other unquoted paths with spaces (e.g. /Volumes/My Disk/socai or C:\Program Files\socai\socai.exe)
+    .replace(
+      /(?:^|[\s"'`([<{=:])(?:\/|~\/|[A-Za-z]:[/\\]|\\\\|\.{1,2}[/\\]|[a-zA-Z][a-zA-Z0-9_.-]*[/\\])(?=[^:\r\n)]*\s+[^:\r\n)]*[/\\])(?:[^\s:)]|(?<! )\s(?! ))*?(?=\s+(?:ENOENT|EACCES|EPERM|EEXIST|not found|no such file|is not recognized|exited with|failed with|script|because|while|when|but|and|or|then|after|before|retrying)\b|(?::|[,;!?)]|\.(?:\s|$))(?:\s|$|\b)|\s{2}|$)/gi,
       (match) => {
         const leadingChar = match.match(/^[\s"'`([<{=:]/)?.[0] || "";
         const pathPart = match.slice(leadingChar.length);
@@ -432,16 +454,25 @@ export function sanitizeCliErrorText(text) {
         return `${leadingChar}[path]${trailingPunct}`;
       },
     )
-    // 3. General paths (single token or standard paths)
-    .replace(/(?:^|[\s"'`([<{=:])(?:[A-Za-z]:[/\\]|~[/\\]|(?:\.{1,2}[/\\]+)|\/(?:[a-zA-Z0-9._~-]+[/\\]))[^\s"'`<>:=)]+/g, (match) => {
+    // 5. General paths (single token or standard paths)
+    .replace(/(?:^|[\s"'`([<{=:])(?:[A-Za-z]:[/\\]|[A-Za-z]:[a-zA-Z0-9._~-]+[/\\]|~[/\\]|(?:\.{1,2}[/\\]+)|[/\\](?:[a-zA-Z0-9._~-]+[/\\])*|[a-zA-Z][a-zA-Z0-9._~-]*[/\\])[^\s"'`<>:=)]+/g, (match) => {
       const leadingChar = match.match(/^[\s"'`([<{=:]/)?.[0] || "";
       const pathPart = match.slice(leadingChar.length);
       const trailingPunct = pathPart.match(/[).,;:!?]+$/)?.[0] || "";
       return `${leadingChar}[path]${trailingPunct}`;
     })
-    // 4. Relative multi-segment paths like foo/bar/baz
+    // 6. Remaining one-token relative paths, including Unicode and dot/scope prefixes
+    .replace(/(?:^|[\s"'`([<{=:])(?=[^\s"'`<>:=)]*\p{L})(?:[^\s"'`<>:=)]+[/\\])+[^\s"'`<>:=)]+/gu, (match) => {
+      const leadingChar = match.match(/^[\s"'`([<{=:]/)?.[0] || "";
+      const pathPart = match.slice(leadingChar.length);
+      const trailingPunct = pathPart.match(/[).,;:!?]+$/)?.[0] || "";
+      return `${leadingChar}[path]${trailingPunct}`;
+    })
+    // 7. Relative paths with a filename, such as logs/error.txt
+    .replace(/\b(?:[A-Za-z]:)?(?:[a-zA-Z0-9_.-]+[/\\])+[a-zA-Z0-9_.-]+\.[a-zA-Z0-9_-]+\b/g, "[path]")
+    // 8. Relative multi-segment paths like foo/bar/baz
     .replace(/\b(?:[a-zA-Z0-9_.-]+[/\\]){2,}[a-zA-Z0-9_.-]+/g, "[path]")
-    // 5. Deduplicate and trim
+    // 9. Deduplicate and trim
     .replace(/(?:\[path\](?:\s+\[path\])*)/g, "[path]")
     .replace(/\s+/g, " ")
     .trim();

@@ -10,6 +10,7 @@ import {
 } from "./evidence-preview.js";
 import { bindPromptButtons, platformLabel, updatePromptButtons } from "./prompts.js";
 import { parseRunRoute, resultHash } from "./run-route.js";
+import { deriveStatusView } from "./status.js";
 
 const $ = (selector) => document.querySelector(selector);
 const elements = {
@@ -220,27 +221,13 @@ async function restoreRunFromRoute() {
 async function refreshStatus() {
   try {
     const status = await api("/api/status");
-    setStatus("jev", status.jevConfigured, status.jevConfigured ? "Jev ready" : "Jev needs a key");
-    const caps = status.socai?.capabilities || {};
-    const installed = Boolean(status.socai?.installed);
-    const available = ["instagram", "tiktok", "linkedin"].filter((p) => caps[p]);
-    const allReady = installed && available.length === 3;
+    const view = deriveStatusView(status);
+    setStatus("jev", view.jev.ready, view.jev.label);
+    setStatus("socai", view.socai.ready, view.socai.label);
+    if (view.error) showError(new Error(view.error));
 
-    let socaiLabel = "socai unavailable";
-    if (installed) {
-      const versionStr = status.socai?.version ? ` v${status.socai.version}` : "";
-      if (allReady) {
-        socaiLabel = `socai${versionStr} ready`;
-      } else if (available.length > 0) {
-        socaiLabel = `socai${versionStr} (${available.length}/3 ready)`;
-      } else {
-        socaiLabel = `socai${versionStr} (no platforms)`;
-      }
-    }
-    setStatus("socai", allReady, socaiLabel);
-
-    updatePlatformOptions(caps);
-    updatePromptButtons(document.querySelectorAll(".prompt-example-btn"), caps);
+    updatePlatformOptions(view.capabilities);
+    updatePromptButtons(document.querySelectorAll(".prompt-example-btn"), view.capabilities);
   } catch (error) {
     showError(error);
   }

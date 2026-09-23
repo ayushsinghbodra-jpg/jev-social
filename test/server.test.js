@@ -17,6 +17,11 @@ test("local APIs require exact same-origin JSON and typed onboarding fields", as
     assert.match(previewModule.headers.get("content-type"), /^text\/javascript/);
     assert.match(await previewModule.text(), /selectSummaryCards/);
 
+    const statusModule = await fetch(`${url}/status.js`);
+    assert.equal(statusModule.status, 200);
+    assert.match(statusModule.headers.get("content-type"), /^text\/javascript/);
+    assert.match(await statusModule.text(), /deriveStatusView/);
+
     const wrongOrigin = await fetch(`${url}/api/onboard`, {
       method: "POST",
       headers: {
